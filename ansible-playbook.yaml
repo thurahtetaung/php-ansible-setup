@@ -1,0 +1,206 @@
+---
+- name: Setup Ubuntu 24.04 Web Server
+  hosts: localhost
+  become: yes
+  vars:
+    swap_size_gb: 4
+    php_version: "8.3"
+    additional_php_extensions: []
+    system_user: ubuntu
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Check if swap file exists
+      stat:
+        path: /swapfile
+      register: swap_file
+
+    - name: Check current swap size
+      command: du -b /swapfile
+      register: current_swap_size
+      when: swap_file.stat.exists
+      changed_when: false
+
+    - name: Create swap file
+      command: dd if=/dev/zero of=/swapfile bs=1G count={{ swap_size_gb }}
+      when: >
+        not swap_file.stat.exists or
+        (swap_file.stat.exists and current_swap_size.stdout.split()[0]|int < swap_size_gb|int * 1024 * 1024 * 1024)
+
+    - name: Set swap file permissions
+      file:
+        path: /swapfile
+        mode: '0600'
+        owner: root
+        group: root
+
+    - name: Check if swap is enabled
+      command: swapon --show
+      register: swap_enabled
+      changed_when: false
+
+    - name: Make and enable swap
+      block:
+        - name: Make swap
+          command: mkswap /swapfile
+
+        - name: Enable swap
+          command: swapon /swapfile
+      when: >
+        not swap_enabled.stdout is search('/swapfile')
+
+    - name: Add swap to /etc/fstab
+      lineinfile:
+        path: /etc/fstab
+        line: '/swapfile none swap sw 0 0'
+        state: present
+
+    - name: Install Nginx and prerequisites
+      apt:
+        name:
+          - nginx
+          - git
+          - ca-certificates
+          - lsb-release
+          - gnupg
+          - curl
+          - software-properties-common
+        state: present
+
+    - name: Add PHP repository
+      apt_repository:
+        repo: "ppa:ondrej/php"
+        state: present
+
+    - name: Update apt cache after adding PHP repo
+      apt:
+        update_cache: yes
+
+    - name: Install PHP and common extensions
+      apt:
+        name:
+          - "php{{ php_version }}"
+          - "php{{ php_version }}-fpm"
+          - "php{{ php_version }}-cli"
+          - "php{{ php_version }}-common"
+          - "php{{ php_version }}-mysql"
+          - "php{{ php_version }}-zip"
+          - "php{{ php_version }}-gd"
+          - "php{{ php_version }}-mbstring"
+          - "php{{ php_version }}-curl"
+          - "php{{ php_version }}-xml"
+          - "php{{ php_version }}-dev"
+          - "php{{ php_version }}-bcmath"
+        state: present
+
+    - name: Install additional PHP extensions
+      apt:
+        name: "php{{ php_version }}-{{ item }}"
+        state: present
+      with_items: "{{ additional_php_extensions }}"
+      when: additional_php_extensions | length > 0
+
+    - name: Install Supervisor
+      apt:
+        name: supervisor
+        state: present
+
+    - name: Install MySQL client
+      apt:
+        name: mysql-client
+        state: present
+
+    - name: Install Redis CLI
+      apt:
+        name: redis-tools
+        state: present
+
+    - name: Start and enable PHP-FPM
+      service:
+        name: "php{{ php_version }}-fpm"
+        state: started
+        enabled: yes
+
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Start and enable Supervisor
+      service:
+        name: supervisor
+        state: started
+        enabled: yes
+
+    # User Management
+    - name: Add ubuntu user to www-data group
+      user:
+        name: "{{ system_user }}"
+        groups: www-data
+        append: yes
+
+    - name: Add www-data user to ubuntu group
+      user:
+        name: www-data
+        groups: "{{ system_user }}"
+        append: yes
+
+    # Service Configurations
+    - name: Configure Nginx to use ubuntu user
+      lineinfile:
+        path: /etc/nginx/nginx.conf
+        regexp: "^user"
+        line: "user {{ system_user }};"
+      notify: Restart Nginx
+
+    - name: Configure PHP-FPM pool
+      template:
+        src: www.conf.j2
+        dest: "/etc/php/{{ php_version }}/fpm/pool.d/www.conf"
+      notify: Restart PHP-FPM
+
+    - name: Configure Supervisor
+      lineinfile:
+        path: /etc/supervisor/supervisord.conf
+        regexp: "^user="
+        line: "user={{ system_user }}"
+      notify: Restart Supervisor
+
+    - name: Start and enable PHP-FPM
+      service:
+        name: "php{{ php_version }}-fpm"
+        state: started
+        enabled: yes
+
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Start and enable Supervisor
+      service:
+        name: supervisor
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+    - name: Restart PHP-FPM
+      service:
+        name: "php{{ php_version }}-fpm"
+        state: restarted
+
+    - name: Restart Supervisor
+      service:
+        name: supervisor
+        state: restarted
